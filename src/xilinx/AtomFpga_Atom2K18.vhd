@@ -814,20 +814,24 @@ begin
                         rtc_irq_flags(4) <= '1';
                         rtc_irq_flags(7) <= '1';
                     end if;
+                    rtc_month(7 downto 4) <= rtc_month(7 downto 4) + 1;
                 end if;
-                if (rtc_day = 31 and (rtc_month = 4 or rtc_month = 6 or rtc_month = 9 or rtc_month = 11))
-                    or (rtc_day = 30 and rtc_month = 2 and rtc_year(1 downto 0) = "00")
-                    or (rtc_day = 29 and rtc_month = 2 and (rtc_year(1) = '1' or rtc_year(0) = '1'))          or (rtc_day = 32) then
-                    rtc_month <= rtc_month + 1;
+                if rtc_month(7 downto 4) = 7 then
+                    rtc_month(7 downto 4) <= x"0";
+                end if;
+                if (rtc_day = 31 and (rtc_month(3 downto 0) = 4 or rtc_month(3 downto 0) = 6 or rtc_month(3 downto 0) = 9 or rtc_month(3 downto 0) = 11))
+                    or (rtc_day = 30 and rtc_month(3 downto 0) = 2 and rtc_year(1 downto 0) = "00")
+                    or (rtc_day = 29 and rtc_month(3 downto 0) = 2 and (rtc_year(1) = '1' or rtc_year(0) = '1'))          or (rtc_day = 32) then
+                    rtc_month(3 downto 0) <= rtc_month(3 downto 0) + 1;
                     rtc_day <= x"01";
                     if rtc_control(5) = '1' then
                         rtc_irq_flags(5) <= '1';
                         rtc_irq_flags(7) <= '1';
                     end if;
                 end if;
-                if rtc_month = 13 then
+                if rtc_month(3 downto 0) = 13 then
                     rtc_year <= rtc_year + 1;
-                    rtc_month <= x"01";
+                    rtc_month(3 downto 0) <= x"1";
                     if rtc_control(6) = '1' then
                         rtc_irq_flags(6) <= '1';
                         rtc_irq_flags(7) <= '1';
