@@ -167,19 +167,43 @@ architecture behavioral of AtomFpga_Atom2K18 is
     signal extern_ram      : std_logic;
     signal extern_tube     : std_logic;
     signal extern_via      : std_logic;
-    signal extern_led      : std_logic;
-    signal extern_rtc      : std_logic;
+    signal extern_pam      : std_logic; -- enable for #B1xx
+    signal extern_sam_rd   : std_logic; -- enable for #BFF0
+    signal extern_sam_wr   : std_logic; -- enable for #BFF1
+
+    -- Internal devices
+    signal intern_led      : std_logic;
+    signal intern_rtc      : std_logic;
+    signal intern_pam_reg0 : std_logic; -- enable for #BFF8
+    signal intern_pam_reg1 : std_logic; -- enable for #BFF9
+    signal intern_sam_reg  : std_logic; -- enable for #BFF2
+
+    -- PAM relayed signals
+    signal pam_page        : std_logic_vector(8 downto 0);
+
+    -- SAM related signals
+    signal sam_rd_addr     : std_logic_vector(17 downto 0);
+    signal sam_rd_next     : std_logic_vector(17 downto 0);
+    signal sam_rd_inc      : std_logic;
+    signal sam_wr_addr     : std_logic_vector(17 downto 0);
+    signal sam_wr_next     : std_logic_vector(17 downto 0);
+    signal sam_wr_inc      : std_logic;
+    signal sam_empty       : std_logic;
+    signal sam_full        : std_logic;
+    signal sam_underflow   : std_logic;
+    signal sam_overflow    : std_logic;
+    signal sam_status      : std_logic_vector(7 downto 0);
 
     -- Internal Test ROM/RAM
-    signal test_romC_data   : std_logic_vector(7 downto 0);
-    signal test_romD_data   : std_logic_vector(7 downto 0);
-    signal test_romE_data   : std_logic_vector(7 downto 0);
-    signal test_romF_data   : std_logic_vector(7 downto 0);
-    signal test_rom_data    : std_logic_vector(7 downto 0);
-    signal test_rom_enable  : std_logic;
-    signal test_ram_addr    : std_logic_vector(12 downto 0);
-    signal test_ram_data    : std_logic_vector(7 downto 0);
-    signal test_ram_enable  : std_logic;
+    signal test_romC_data  : std_logic_vector(7 downto 0);
+    signal test_romD_data  : std_logic_vector(7 downto 0);
+    signal test_romE_data  : std_logic_vector(7 downto 0);
+    signal test_romF_data  : std_logic_vector(7 downto 0);
+    signal test_rom_data   : std_logic_vector(7 downto 0);
+    signal test_rom_enable : std_logic;
+    signal test_ram_addr   : std_logic_vector(12 downto 0);
+    signal test_ram_data   : std_logic_vector(7 downto 0);
+    signal test_ram_enable : std_logic;
 
     -- Switch debouncing
     signal sw_pressed      : std_logic_vector(2 downto 1);
@@ -190,6 +214,7 @@ architecture behavioral of AtomFpga_Atom2K18 is
     signal last_sync       : std_logic;
     signal instr_count     : unsigned(15 downto 0);
     signal led_state       : unsigned(3 downto 0);
+    signal led_data        : std_logic_vector(7 downto 0);
 
     -- RTC
     signal rtc_seconds     : std_logic_vector(7 downto 0);
@@ -203,9 +228,14 @@ architecture behavioral of AtomFpga_Atom2K18 is
     signal rtc_10hz        : std_logic_vector(3 downto 0);
     signal rtc_cnt         : std_logic_vector(21 downto 0);
     signal rtc_irq_n       : std_logic := '1';
+    signal rtc_data        : std_logic_vector(7 downto 0);
 
     -- Interrupt logic
     signal irq_n           : std_logic := '1';
+
+    -- Debug mode
+    signal remote_access   : std_logic;
+    signal debug_mode      : std_logic;
 
 begin
 
@@ -532,8 +562,26 @@ begin
     bus_phi2    <= phi2;
     bus_rnw     <= rnw;
     bus_sync    <= sync;
-    bus_a       <= extern_a;
-    bus_d       <= extern_din when rnw = '0' else "ZZZZZZZZ";
+
+    bus_a       <= "1" & sam_rd_addr                      when extern_sam_rd = '1' and rnw = '1' else
+                   "1" & sam_wr_addr                      when extern_sam_wr = '1' and rnw = '0' else
+                   "00" & pam_page & extern_a(7 downto 0) when extern_pam = '1'                  else
+                   extern_a;
+
+    -- Enable data out of the FPGA onto the 3.3V databus in the following cases:
+    -- case 1. all writes from the "core"
+    -- case 2. reads that are internal to the "core", when debug mode enables
+    -- case 3. reads of the led registers, when debug mode enabled
+    -- case 4. reads of the rtc registers, when debug mode enabled
+    -- TODO: test_rom_data and test_ram_data should be included here (or dropped)
+    bus_d       <= extern_din               when phi2 = '1' and rnw = '0'                                                 else
+                   extern_din               when phi2 = '1' and extern_ce = '0' and extern_bus = '0' and debug_mode = '1' else
+                   led_data                 when phi2 = '1' and intern_led = '1'                     and debug_mode = '1' else
+                   rtc_data                 when phi2 = '1' and intern_rtc = '1'                     and debug_mode = '1' else
+                   sam_status               when phi2 = '1' and intern_sam_reg = '1'                 and debug_mode = '1' else
+                   pam_page(7 downto 0)     when phi2 = '1' and intern_pam_reg0 = '1'                and debug_mode = '1' else
+                   "0000000" & pam_page(8)  when phi2 = '1' and intern_pam_reg1 = '1'                and debug_mode = '1' else
+                   "ZZZZZZZZ";
 
     bus_nrds    <= '0' when extern_ce  = '1' and extern_we = '0' and phi2 = '1' else -- RamRom
                    '0' when extern_bus = '1' and rnw       = '1' and phi2 = '1' else -- Bus
@@ -543,18 +591,14 @@ begin
                    '0' when extern_bus = '1' and rnw       = '0' and phi2 = '1' else -- Bus
                    '1';
 
-    extern_dout <= test_rom_data when CImplTestRom and test_rom_enable = '1' else
-                   test_ram_data when CImplTestRam and test_ram_enable = '1' else
-                   led_data_reg  when extern_led = '1' and extern_a(0) = '1' else
-                   led_ctrl_reg  when extern_led = '1' and extern_a(0) = '0' else
-                   rtc_year      when extern_rtc = '1' and extern_a(2 downto 0) = "000" else
-                   rtc_month     when extern_rtc = '1' and extern_a(2 downto 0) = "001" else
-                   rtc_day       when extern_rtc = '1' and extern_a(2 downto 0) = "010" else
-                   rtc_hours     when extern_rtc = '1' and extern_a(2 downto 0) = "011" else
-                   rtc_minutes   when extern_rtc = '1' and extern_a(2 downto 0) = "100" else
-                   rtc_seconds   when extern_rtc = '1' and extern_a(2 downto 0) = "101" else
-                   rtc_control   when extern_rtc = '1' and extern_a(2 downto 0) = "110" else
-                   rtc_irq_flags when extern_rtc = '1' and extern_a(2 downto 0) = "111" else
+    -- data back into the Atom Core
+    extern_dout <= test_rom_data           when CImplTestRom and test_rom_enable = '1' else
+                   test_ram_data           when CImplTestRam and test_ram_enable = '1' else
+                   led_data                when                       intern_led = '1' else
+                   rtc_data                when                       intern_rtc = '1' else
+                   sam_status              when                   intern_sam_reg = '1' else
+                   pam_page(7 downto 0)    when                  intern_pam_reg0 = '1' else
+                   "0000000" & pam_page(8) when                  intern_pam_reg1 = '1' else
                    bus_d;
 
     ------------------------------------------------
@@ -564,24 +608,167 @@ begin
     irq_n <= bus_irq_n and rtc_irq_n;
 
     ------------------------------------------------
+    -- Sequential Access Memory (SAM)
+    ------------------------------------------------
+
+    -- Status byte
+    sam_status <= sam_empty & sam_full & "0000" & sam_underflow & sam_overflow;
+
+    process(clock_32)
+    begin
+        if rising_edge(clock_32) then
+            if intern_sam_reg = '1' and rnw = '0' and phi2 = '1' then
+                -- a write of '1' to SAM control register bit 0 clears the overflow error
+                if extern_din(0) = '1' then
+                    sam_overflow <= '0';
+                end if;
+                -- a write of '1' to SAM control register bit 1 clears the underflow error
+                if extern_din(1) = '1' then
+                    sam_underflow <= '0';
+                end if;
+                -- a write of '1' to SAM control register bit 2 resets everything
+                if extern_din(2) = '1' then
+                    sam_rd_inc    <= '0';
+                    sam_wr_inc    <= '0';
+                    sam_rd_addr   <= (others => '0');
+                    sam_wr_addr   <= (others => '0');
+                    sam_underflow <= '0';
+                    sam_overflow  <= '0';
+                end if;
+            elsif extern_sam_rd = '1' and rnw = '1' and phi2 = '1' then
+                -- a read from the SAM data register
+                if sam_empty = '0' then
+                    sam_rd_inc <= '1';
+                else
+                    sam_underflow <= '1';
+                end if;
+            elsif extern_sam_wr = '1' and rnw = '0' and phi2 = '1' then
+                -- a write to the SAM data register
+                if sam_full = '0' then
+                    sam_wr_inc <= '1';
+                else
+                    sam_overflow <= '1';
+                end if;
+            elsif phi2 = '0' then
+                -- Handle the update of the SAM addresses as soon as Phi2 goes
+                -- low at the start of the next bus cycle
+                if sam_rd_inc = '1' then
+                    sam_rd_addr <= sam_rd_next;
+                end if;
+                if sam_wr_inc = '1' then
+                    sam_wr_addr <= sam_wr_next;
+                end if;
+                -- clear the inc flags, so we only increment by one
+                sam_rd_inc <= '0';
+                sam_wr_inc <= '0';
+            end if;
+        end if;
+    end process;
+
+    -- combinatorial logic for full,empty flags
+    process(sam_rd_addr, sam_wr_addr)
+    begin
+        if sam_rd_addr = sam_wr_addr then
+            sam_empty <= '1';
+        else
+            sam_empty <= '0';
+        end if;
+        if sam_wr_next = sam_rd_addr then
+            sam_full <= '1';
+        else
+            sam_full <= '0';
+        end if;
+    end process;
+
+    -- combinatorial logic for next rd address
+    process(sam_rd_addr)
+    begin
+        sam_rd_next <= sam_rd_addr + 1;
+    end process;
+
+    -- combinatorial logic for next write address
+    process(sam_wr_addr)
+    begin
+        sam_wr_next <= sam_wr_addr + 1;
+    end process;
+
+    ------------------------------------------------
+    -- Page Access Memory (PAM)
+    ------------------------------------------------
+
+    process(clock_32)
+    begin
+        if rising_edge(clock_32) then
+            if rnw = '0' and phi2 = '1' then
+                if intern_pam_reg0 = '1' then
+                    pam_page(7 downto 0) <= extern_din;
+                end if;
+                if intern_pam_reg1 = '1' then
+                    pam_page(8) <= extern_din(0);
+                end if;
+            end if;
+        end if;
+    end process;
+
+    ------------------------------------------------
+    -- Internal device chip selects
+    ------------------------------------------------
+
+    intern_led      <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BFE"  else '0';
+    intern_rtc      <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BFD"  else '0';
+    intern_sam_reg  <= '1' when extern_bus = '1' and extern_a(15 downto 0) = x"BFF2" else '0';
+    intern_pam_reg0 <= '1' when extern_bus = '1' and extern_a(15 downto 0) = x"BFF8" else '0';
+    intern_pam_reg1 <= '1' when extern_bus = '1' and extern_a(15 downto 0) = x"BFF9" else '0';
+
+    ------------------------------------------------
     -- External device chip selects
     ------------------------------------------------
 
-    extern_rom  <= '1' when extern_ce  = '1' and extern_a(17) = '0'             else '0';
-    extern_ram  <= '1' when extern_ce  = '1' and extern_a(17) = '1'             else '0';
-    extern_via  <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"B81" else '0';
-    extern_tube <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BEE" else '0';
-    extern_led  <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BFE" else '0';
-    extern_rtc  <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BFD" else '0';
+    extern_rom    <= '1' when extern_ce  = '1' and extern_a(17) = '0'             else
+                     '0';
+
+    extern_ram    <= '1' when extern_ce  = '1' and extern_a(17) = '1'             else
+                     '1' when extern_sam_rd = '1' or extern_sam_wr = '1'          else
+                     '1' when extern_pam = '1'                                    else
+                     '0';
+
+    extern_via    <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"B81" else
+                     '0';
+
+    extern_tube   <= '1' when extern_bus = '1' and extern_a(15 downto 4) = x"BEE" else
+                     '0';
+
+    extern_sam_rd <= '1' when extern_bus = '1' and extern_a(15 downto 0) = x"BFF0" else
+                     '0';
+
+    extern_sam_wr <= '1' when extern_bus = '1' and extern_a(15 downto 0) = x"BFF1" else
+                     '0';
+
+    extern_pam    <= '1' when extern_bus = '1' and extern_a(15 downto 8) = x"B1" else
+                     '0';
 
     cs_rom_n    <= not(extern_rom);
     cs_ram_n    <= not(extern_ram);
     cs_via_n    <= not(extern_via);
     cs_tube_n   <= not(extern_tube);
 
-    cs_buf_n    <= not(extern_bus and not extern_tube and not extern_led);  -- Tube is on the 3v3 side of the bus
-    buf_dir     <= rnw;
+    -- A remote access is to a device on the far side of the data buffers
+    -- The tube is on the near side of the data buffers, so exclude
+    -- The LED and RTC registers are internal to this module, so exclude
+    remote_access <= '1' when extern_bus = '1' and extern_tube = '0' and extern_sam_rd = '0' and extern_sam_wr = '0' and extern_pam = '0' and
+                              intern_led = '0' and intern_rtc = '0' and intern_sam_reg = '0' and intern_pam_reg0 = '0' and intern_pam_reg1 = '0' else '0';
 
+    -- In normal mode, enable the data buffers only for remote accesses.
+    -- In debug mode, enable the data buffers all the time.
+    cs_buf_n    <= '0' when phi2 = '1' and                         debug_mode = '1' else
+                   '0' when phi2 = '1' and remote_access = '1' and debug_mode = '0' else
+                   '1';
+
+    -- In normal mode, the direction is inward for reads, outward for writes.
+    -- In debug mode, the direction is inward for remote reads, outward for everything else.
+    buf_dir     <= '1' when remote_access = '1' and rnw = '1' and debug_mode = '1' else
+                   '0' when debug_mode = '1' else
+                    rnw;
     ------------------------------------------------
     -- Audio mixer
     ------------------------------------------------
@@ -715,7 +902,7 @@ begin
                 led_ctrl_reg(1 downto 0) <= led_ctrl_reg(1 downto 0) + 1;
             end if;
             -- LED control/data registers
-            if extern_led = '1' and rnw = '0' and phi2 = '1' then
+            if intern_led = '1' and rnw = '0' and phi2 = '1' then
                 if extern_a(0) = '1' then
                     led_data_reg <= extern_din;
                 else
@@ -763,6 +950,14 @@ begin
             end case;
         end if;
     end process;
+
+    led_data <= led_ctrl_reg when extern_a(0) = '0' else
+                led_data_reg when extern_a(1) = '1' else
+                x"00";
+
+    -- Enable debug mode (logic analyzer output to data bus)in address mode
+    -- (when the LEDs are showing the low or high address bus)
+    debug_mode <= led_ctrl_reg(1);
 
     --------------------------------------------------------
     -- RTC Real Time Clock
@@ -840,7 +1035,7 @@ begin
             end if;
 
             -- write RTC control/data registers
-            if extern_rtc = '1' and rnw = '0' and phi2 = '1' then
+            if intern_rtc = '1' and rnw = '0' and phi2 = '1' then
                 case extern_a(2 downto 0) is
                     when "000" =>
                         rtc_year <= extern_din;
@@ -869,6 +1064,16 @@ begin
         end if;
 
     end process;
+
+    rtc_data <= rtc_year      when extern_a(2 downto 0) = "000" else
+                rtc_month     when extern_a(2 downto 0) = "001" else
+                rtc_day       when extern_a(2 downto 0) = "010" else
+                rtc_hours     when extern_a(2 downto 0) = "011" else
+                rtc_minutes   when extern_a(2 downto 0) = "100" else
+                rtc_seconds   when extern_a(2 downto 0) = "101" else
+                rtc_control   when extern_a(2 downto 0) = "110" else
+                rtc_irq_flags when extern_a(2 downto 0) = "111" else
+                x"00";
 
     rtc_irq_n <= not(rtc_irq_flags(7));
 

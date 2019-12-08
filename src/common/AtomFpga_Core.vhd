@@ -116,11 +116,14 @@ architecture BEHAVIORAL of AtomFpga_Core is
     signal clk_counter       : std_logic_vector(4 downto 0);
     signal cpu_cycle         : std_logic;
     signal cpu_clken         : std_logic;
+    signal pia_clken         : std_logic;
     signal sample_data       : std_logic;
 
 -------------------------------------------------
 -- CPU signals
 -------------------------------------------------
+    signal powerup_reset_n_sync : std_logic;
+    signal ext_reset_n_sync     : std_logic;
     signal RSTn              : std_logic;
     signal cpu_R_W_n         : std_logic;
     signal not_cpu_R_W_n     : std_logic;
@@ -128,6 +131,7 @@ architecture BEHAVIORAL of AtomFpga_Core is
     signal cpu_din           : std_logic_vector (7 downto 0);
     signal cpu_dout          : std_logic_vector (7 downto 0);
     signal cpu_IRQ_n         : std_logic;
+    signal ExternDin1        : std_logic_vector (7 downto 0);
     signal ExternDout1       : std_logic_vector (7 downto 0);
 
 ---------------------------------------------------
@@ -268,10 +272,16 @@ begin
     not_cpu_R_W_n <= not cpu_R_W_n;
     cpu_IRQ_n     <= irq_n and mc6522_irq when CImplVIA else
                      irq_n;
-
     -- reset logic
-    RSTn          <= key_break and powerup_reset_n and ext_reset_n;
-    int_reset_n   <= key_break;
+    process(clk_main)
+    begin
+        if rising_edge(clk_main) then
+            powerup_reset_n_sync <= powerup_reset_n;
+            ext_reset_n_sync     <= ext_reset_n;
+            RSTn                 <= key_break and powerup_reset_n_sync and ext_reset_n_sync;
+            int_reset_n          <= key_break;
+        end if;
+    end process;
 
     -- write enables
     gated_we      <= not_cpu_R_W_n;
@@ -361,7 +371,7 @@ begin
         I_PC   => i8255_pc_idata(7 downto 4),
         O_PC   => i8255_pc_data(3 downto 0),
         RESET  => RSTn,
-        ENA    => cpu_clken,
+        ENA    => pia_clken,
         CLK    => clk_main);
 
     -- Port A
@@ -415,7 +425,7 @@ begin
 
     input : entity work.keyboard port map(
         CLOCK      => clk_main,
-        nRESET     => powerup_reset_n,
+        nRESET     => powerup_reset_n_sync,
         CLKEN_1MHZ => cpu_clken,
         PS2_CLK    => ps2_clk,
         PS2_DATA   => ps2_data,
@@ -613,7 +623,7 @@ begin
                 ExternCE     => ExternCE,
                 ExternWE     => ExternWE,
                 ExternA      => ExternA,
-                ExternDin    => ExternDin,
+                ExternDin    => ExternDin1,
                 ExternDout   => ExternDout1
                 );
         turbo <= key_turbo;
@@ -633,7 +643,7 @@ begin
                 ExternCE     => ExternCE,
                 ExternWE     => ExternWE,
                 ExternA      => ExternA,
-                ExternDin    => ExternDin,
+                ExternDin    => ExternDin1,
                 ExternDout   => ExternDout1
                 );
         turbo <= key_turbo;
@@ -653,7 +663,7 @@ begin
                 ExternCE     => ExternCE,
                 ExternWE     => ExternWE,
                 ExternA      => ExternA,
-                ExternDin    => ExternDin,
+                ExternDin    => ExternDin1,
                 ExternDout   => ExternDout1,
                 -- turbo mode control
                 turbo_in     => key_turbo,
@@ -675,11 +685,13 @@ begin
                 ExternCE     => ExternCE,
                 ExternWE     => ExternWE,
                 ExternA      => ExternA,
-                ExternDin    => ExternDin,
+                ExternDin    => ExternDin1,
                 ExternDout   => ExternDout1
                 );
         turbo <= key_turbo;
     end generate;
+
+    ExternDin <= ExternDin1 when cpu_R_W_n = '0' else cpu_din;
 
 ---------------------------------------------------------------------
 -- Profiling Counters
@@ -791,7 +803,7 @@ begin
                     sid_enable <= '1';
                 elsif cpu_addr(11 downto 5) & '0' = x"DE" then -- 0xBDEx, 0xBDFx GODIL Registers
                     reg_enable <= '1';
-                elsif cpu_addr(11 downto 4)       = x"FF" then -- 0xBFFx RomLatch
+                elsif cpu_addr(11 downto 2) & "00"= x"FFC" then -- 0xBFFC-BFFF RomLatch
                     ext_ramrom_enable <= '1';
                 elsif cpu_addr(11 downto 8)      /= x"D"  then -- any non-mapped 0xBxxx address is deemed external
                     ext_bus_enable <= '1';                     -- apart from 0xBDxx which are deemed reserved
@@ -884,14 +896,21 @@ begin
                 clk_counter <= clk_counter + 1;
             end if;
 
-            -- Asset cpu_clken in cycle 0
+            -- Assert cpu_clken in cycle 0
             if clk_counter = limit then
                 cpu_clken <= '1';
             else
                 cpu_clken <= '0';
             end if;
 
-            -- Asset via1_clken in cycle 0
+            -- Assert pia_clken in anti-phase with cpu_clken
+            if clk_counter = phi2h then
+                pia_clken <= '1';
+            else
+                pia_clken <= '0';
+            end if;
+
+            -- Assert via1_clken in cycle 0
             if clk_counter = limit then
                 via1_clken <= '1';
             else
@@ -905,7 +924,7 @@ begin
                 via4_clken <= '0';
             end if;
 
-            -- Asset phi2 at the specified times
+            -- Assert phi2 at the specified times
             if clk_counter = phi2h then
                 phi2 <= '1';
             elsif clk_counter = phi2l then
